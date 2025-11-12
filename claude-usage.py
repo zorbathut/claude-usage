@@ -12,10 +12,14 @@ from pathlib import Path
 from datetime import datetime
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+import time
 
 # Configuration
 API_URL = 'https://api.anthropic.com/api/oauth/usage'
+TOKEN_REFRESH_URL = 'https://console.anthropic.com/v1/oauth/token'
+CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 ANTHROPIC_BETA = 'oauth-2025-04-20'
+TOKEN_REFRESH_BUFFER_MS = 300000  # Refresh 5 minutes before expiration
 
 
 def get_config_dir():
@@ -23,8 +27,8 @@ def get_config_dir():
     return Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home() / '.claude'))
 
 
-def get_oauth_token_from_file():
-    """Get OAuth token from credentials file"""
+def get_oauth_data_from_file():
+    """Get OAuth data from credentials file"""
     creds_path = get_config_dir() / '.credentials.json'
 
     if not creds_path.exists():
@@ -33,9 +37,15 @@ def get_oauth_token_from_file():
     try:
         with open(creds_path, 'r') as f:
             data = json.load(f)
-            return data.get('claudeAiOauth', {}).get('accessToken')
+            return data.get('claudeAiOauth')
     except (json.JSONDecodeError, IOError):
         return None
+
+
+def get_oauth_token_from_file():
+    """Get OAuth token from credentials file"""
+    oauth_data = get_oauth_data_from_file()
+    return oauth_data.get('accessToken') if oauth_data else None
 
 
 def get_oauth_token_from_keychain():
@@ -79,13 +89,119 @@ def get_api_key():
     return None
 
 
+def is_token_expired(expires_at):
+    """Check if token is expired or about to expire (within 5 minutes)"""
+    if expires_at is None:
+        return False
+
+    current_time_ms = int(time.time() * 1000)
+    return current_time_ms + TOKEN_REFRESH_BUFFER_MS >= expires_at
+
+
+def refresh_oauth_token(refresh_token):
+    """Refresh OAuth token using refresh token"""
+    payload = {
+        'grant_type': 'refresh_token',
+        'refresh_token': refresh_token,
+        'client_id': CLIENT_ID
+    }
+
+    data = json.dumps(payload).encode('utf-8')
+    req = Request(
+        TOKEN_REFRESH_URL,
+        data=data,
+        headers={
+            'Content-Type': 'application/json',
+            'User-Agent': 'claude-usage-script/1.0'
+        }
+    )
+
+    try:
+        with urlopen(req, timeout=10) as response:
+            result = json.loads(response.read())
+
+            # Calculate expiration time
+            expires_at = int(time.time() * 1000) + (result['expires_in'] * 1000)
+
+            return {
+                'accessToken': result['access_token'],
+                'refreshToken': result.get('refresh_token', refresh_token),
+                'expiresAt': expires_at,
+                'scope': result.get('scope', '')
+            }
+    except HTTPError as e:
+        error_body = e.read().decode()
+        raise RuntimeError(f'Token refresh failed (status {e.code}): {error_body}')
+    except URLError as e:
+        raise RuntimeError(f'Token refresh request failed: {e.reason}')
+    except Exception as e:
+        raise RuntimeError(f'Token refresh error: {e}')
+
+
+def save_oauth_data(oauth_data):
+    """Save OAuth data to credentials file"""
+    creds_path = get_config_dir() / '.credentials.json'
+
+    try:
+        # Read existing data
+        existing_data = {}
+        if creds_path.exists():
+            with open(creds_path, 'r') as f:
+                existing_data = json.load(f)
+
+        # Update OAuth data
+        existing_data['claudeAiOauth'] = oauth_data
+
+        # Write back
+        with open(creds_path, 'w') as f:
+            json.dump(existing_data, f, indent=2)
+
+        return True
+    except Exception as e:
+        print(f'Warning: Failed to save refreshed token: {e}', file=sys.stderr)
+        return False
+
+
+def ensure_valid_oauth_token():
+    """Ensure OAuth token is valid, refresh if necessary"""
+    oauth_data = get_oauth_data_from_file()
+
+    if not oauth_data:
+        return None
+
+    # Check if token needs refresh
+    if not oauth_data.get('refreshToken') or not oauth_data.get('expiresAt'):
+        # Token doesn't have refresh capability, just return access token
+        return oauth_data.get('accessToken')
+
+    if is_token_expired(oauth_data['expiresAt']):
+        try:
+            # Refresh the token
+            new_oauth_data = refresh_oauth_token(oauth_data['refreshToken'])
+
+            # Preserve additional fields
+            new_oauth_data['scopes'] = oauth_data.get('scopes', [])
+            new_oauth_data['subscriptionType'] = oauth_data.get('subscriptionType')
+
+            # Save the new token
+            save_oauth_data(new_oauth_data)
+
+            return new_oauth_data['accessToken']
+        except RuntimeError as e:
+            print(f'Warning: Token refresh failed: {e}', file=sys.stderr)
+            print('Please run "claude login" to re-authenticate', file=sys.stderr)
+            return None
+
+    return oauth_data['accessToken']
+
+
 def get_auth_headers():
     """Get authentication headers"""
-    # Try OAuth first
+    # Try OAuth first (with automatic refresh)
     oauth_token = (
         os.environ.get('CLAUDE_CODE_OAUTH_TOKEN') or
         get_oauth_token_from_keychain() or
-        get_oauth_token_from_file()
+        ensure_valid_oauth_token()
     )
 
     if oauth_token:
