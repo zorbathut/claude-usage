@@ -8,6 +8,9 @@ from datetime import datetime, timezone
 
 def format_duration(reset_time_str):
     """Format time until reset as compact string like '3h' or '17m'."""
+    if reset_time_str is None:
+        return None
+
     reset_time = datetime.fromisoformat(reset_time_str)
     now = datetime.now(timezone.utc)
     delta = reset_time - now
@@ -45,12 +48,18 @@ def main():
     if five_hour:
         util = five_hour.get("utilization", 0)
         reset = format_duration(five_hour.get("resets_at"))
-        parts.append(f"{util}%↻{reset}")
+        if reset:
+            parts.append(f"{util}%↻{reset}")
+        else:
+            parts.append(f"{util}%")
 
     if seven_day:
         util = seven_day.get("utilization", 0)
         reset = format_duration(seven_day.get("resets_at"))
-        parts.append(f"{util}%↻{reset}")
+        if reset:
+            parts.append(f"{util}%↻{reset}")
+        else:
+            parts.append(f"{util}%")
 
     print(" ".join(parts))
 
