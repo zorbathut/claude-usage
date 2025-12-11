@@ -46,7 +46,7 @@ def main():
     parts = []
 
     if five_hour:
-        util = five_hour.get("utilization", 0)
+        util = int(five_hour.get("utilization", 0))
         reset = format_duration(five_hour.get("resets_at"))
         if reset:
             parts.append(f"{util}%↻{reset}")
@@ -54,7 +54,7 @@ def main():
             parts.append(f"{util}%")
 
     if seven_day:
-        util = seven_day.get("utilization", 0)
+        util = int(seven_day.get("utilization", 0))
         reset = format_duration(seven_day.get("resets_at"))
         if reset:
             parts.append(f"{util}%↻{reset}")
