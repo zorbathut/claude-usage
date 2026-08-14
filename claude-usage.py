@@ -253,28 +253,54 @@ def format_reset_time(reset_date_str):
         return reset_date_str
 
 
-def create_progress_bar(percentage, width=50):
-    """Create a progress bar"""
+def compute_pace(resets_at_str, window_hours):
+    """Percent of the limit window elapsed — the 'standard usage line'."""
+    if not resets_at_str or not window_hours:
+        return None
+
+    try:
+        reset_date = datetime.fromisoformat(resets_at_str.replace('Z', '+00:00'))
+    except (ValueError, AttributeError):
+        return None
+
+    remaining = (reset_date - datetime.now(reset_date.tzinfo)).total_seconds()
+    frac = 1 - remaining / (window_hours * 3600)
+
+    return max(0, min(100, round(frac * 100)))
+
+
+def create_progress_bar(percentage, width=50, pace=None):
+    """Create a progress bar, optionally with a tick marking the pace line"""
     percentage = max(0, min(100, percentage))
     filled = int((percentage / 100) * width)
     empty = width - filled
 
-    return '█' * filled + '░' * empty
+    bar = '█' * filled + '░' * empty
+
+    if pace is not None:
+        tick = min(width - 1, int((pace / 100) * width))
+        bar = bar[:tick] + '╂' + bar[tick + 1:]
+
+    return bar
 
 
-def format_limit(title, limit_data, verbose=False):
+def format_limit(title, limit_data, verbose=False, window_hours=None):
     """Format usage limit display"""
     if not limit_data or limit_data.get('utilization') is None:
         return None
 
     percentage = int(limit_data['utilization'])
-    bar = create_progress_bar(percentage)
+    pace = compute_pace(limit_data.get('resets_at'), window_hours)
+    bar = create_progress_bar(percentage, pace=pace)
     reset_time = format_reset_time(limit_data.get('resets_at'))
 
+    # Signed headroom vs the pace line: + means under pace, - means over
+    pace_note = f" ({pace - percentage:+d} vs pace)" if pace is not None else ""
+
     if verbose:
-        return f"{title}:\n  {bar} {percentage}% used\n  Resets {reset_time}\n"
+        return f"{title}:\n  {bar} {percentage}% used{pace_note}\n  Resets {reset_time}\n"
     else:
-        return f"{title}: [{bar}] {percentage}% (resets {reset_time})"
+        return f"{title}: [{bar}] {percentage}%{pace_note} (resets {reset_time})"
 
 
 def fetch_usage():
@@ -313,14 +339,15 @@ def display_usage(json_output=False, verbose=False):
         print('Claude Code Usage Statistics\n')
 
         limits = [
-            ('Current session (5 hours)', usage.get('five_hour')),
-            ('Current week (all models)', usage.get('seven_day')),
-            ('Current week (Opus)', usage.get('seven_day_opus'))
+            ('Current session (5 hours)', usage.get('five_hour'), None),
+            ('Current week (all models)', usage.get('seven_day'), 168),
+            ('Current week (Opus)', usage.get('seven_day_opus'), 168)
         ]
 
         has_data = False
-        for title, limit_data in limits:
-            formatted = format_limit(title, limit_data, verbose)
+        for title, limit_data, window_hours in limits:
+            formatted = format_limit(title, limit_data, verbose,
+                                     window_hours=window_hours)
             if formatted:
                 print(formatted)
                 has_data = True
